@@ -75,6 +75,70 @@ header p {
     color: var(--text-muted);
 }
 
+.twinkle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2px 14px;
+    margin-right: 6px;
+    border-radius: 50px;
+    /* 더 둥글게 */
+    font-weight: 800;
+    font-size: 1.1rem;
+    position: relative;
+    color: #fff !important;
+    background: linear-gradient(135deg, #ff0000, #ff7f00, #ffff00, #00ff00, #0000ff, #4b0082, #9400d3);
+    background-size: 300% 300%;
+    animation: rainbow-bg 4s infinite linear;
+    box-shadow: 0 0 15px rgba(59, 130, 246, 0.4);
+    border: 1px solid rgba(255, 255, 255, 0.4);
+    overflow: hidden;
+    vertical-align: middle;
+    text-shadow: 1px 1px 3px rgba(0, 0, 0, 0.6);
+    z-index: 1;
+    white-space: nowrap;
+    /* 텍스트 줄바꿈 방지 */
+    min-width: 80px;
+    /* 최소 너비 확보 */
+}
+
+.twinkle::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -150%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.5), transparent);
+    animation: shine 2.5s infinite;
+    z-index: -1;
+    /* 텍스트 뒤로 배치 */
+}
+
+@keyframes rainbow-bg {
+    0% {
+        background-position: 0% 50%;
+    }
+
+    50% {
+        background-position: 100% 50%;
+    }
+
+    100% {
+        background-position: 0% 50%;
+    }
+}
+
+@keyframes shine {
+    0% {
+        left: -150%;
+    }
+
+    100% {
+        left: 150%;
+    }
+}
+
 main {
     display: flex;
     flex-direction: column;
@@ -102,11 +166,11 @@ h2 {
 
 .form-grid {
     display: grid;
-    grid-template-columns: repeat(5, 1fr);
-    /* 5개 항목 고정 */
-    gap: 15px;
-    /* 간격을 약간 프리하게 조절 */
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    /* 최소 너비 무시하고 균등 배분 */
+    gap: 12px;
     margin-bottom: 30px;
+    width: 100%;
 }
 
 .input-group.full-width {
@@ -224,31 +288,36 @@ h2 {
 .danger-btn,
 .secondary-btn {
     flex: 1.5;
-    /* 주요 버튼은 넓게 */
     border: none;
     border-radius: 12px;
-    padding: 16px 20px;
-    font-size: 1.05rem;
+    padding: 14px 15px;
+    /* 패딩 약간 축소 */
+    font-size: 1rem;
+    /* 폰트 약간 축소 */
     font-weight: 700;
     cursor: pointer;
     transition: all 0.2s;
     color: white;
     white-space: nowrap;
+    min-width: 0;
+    /* 플렉스박스 내 넘침 방지 */
 }
 
 .outline-btn,
 .dark-btn {
     flex: 1;
-    /* 보조 버튼은 좁게 */
     border: none;
     border-radius: 12px;
-    padding: 12px 15px;
+    padding: 12px 10px;
+    /* 패딩 축소 */
     font-size: 0.85rem;
     font-weight: 600;
     cursor: pointer;
     transition: all 0.2s;
     color: white;
     white-space: nowrap;
+    min-width: 0;
+    /* 플렉스박스 내 넘침 방지 */
 }
 
 .primary-btn {
