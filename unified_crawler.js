@@ -104,12 +104,27 @@ async function runUnifiedCrawl(userConfig) {
                 // 1. 현재 목록 페이지의 모든 상품 ID 추출
                 const productsOnPage = await page.evaluate((minPrice) => {
                     const items = [];
-                    document.querySelectorAll('.ProductUnit_productUnit__Qd6sv').forEach(unit => {
+                    // 클래스명 해시값이 바뀌어도 동작하도록 수정
+                    document.querySelectorAll('[class*="ProductUnit_productUnit"]').forEach(unit => {
                         const link = unit.querySelector('a[href*="/vp/products/"]');
-                        const priceElem = unit.querySelector('.Price_priceValue__A4KOr');
-                        if (!link || !priceElem) return;
+                        if (!link) return;
 
-                        const price = parseInt(priceElem.textContent.replace(/[^0-9]/g, ''), 10);
+                        let priceText = null;
+                        const walker = document.createTreeWalker(unit, NodeFilter.SHOW_TEXT, null, false);
+                        let node;
+                        while ((node = walker.nextNode())) {
+                            if (node.nodeValue.includes('원')) {
+                                let text = node.nodeValue.trim();
+                                // <del> 태그(할인 전 가격)가 아닌 실제 가격 추출
+                                if (/^[0-9,]+원$/.test(text) && node.parentElement && node.parentElement.tagName !== 'DEL') {
+                                    priceText = text;
+                                }
+                            }
+                        }
+
+                        if (!priceText) return;
+
+                        const price = parseInt(priceText.replace(/[^0-9]/g, ''), 10);
                         if (price < minPrice) return;
 
                         const href = link.getAttribute('href');
