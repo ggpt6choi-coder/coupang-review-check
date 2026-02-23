@@ -87,6 +87,8 @@ async function runUnifiedCrawl(userConfig) {
         );
 
         isStopRequested = false; // 시작 시 초기화
+        let sessionProcessedCount = 0; // 연속 처리 상품 개수
+        let nextBreakCount = Math.floor(Math.random() * 10) + 25; // 다음 휴식까지의 목표 개수 (25~34개)
 
         for (const baseUrl of categoryUrls) {
             if (isStopRequested) break;
@@ -148,94 +150,197 @@ async function runUnifiedCrawl(userConfig) {
                 for (let i = 0; i < productsOnPage.length; i++) {
                     if (isStopRequested) break;
                     const product = productsOnPage[i];
-                    const progress = `[카테고리:${baseUrl.split('/').pop().split('?')[0]} | 상품:${i + 1}/${productsOnPage.length}]`;
+                    const progress = `[카테고리:${baseUrl.split('/').pop().split('?')[0]} (${currentPage}/${currentConfig.maxPages}) | 상품:${i + 1}/${productsOnPage.length}]`;
 
                     if (processedIds.has(product.productId)) {
                         sendLog(`${progress} ⏩ 상품 ${product.productId} 건너뜀 (이미 처리됨)`);
                         continue;
                     }
 
-                    // 상품 상세 페이지로 이동
+                    // 상품 상세 페이지 URL 생성 (로그 및 저장용)
                     const detailUrl = `https://www.coupang.com/vp/products/${product.productId}?itemId=${product.itemId}&vendorItemId=${product.vendorItemId}`;
                     sendLog(`\n${progress} 🔄 분석 중: ${detailUrl}`);
 
                     try {
-                        // 이동 전 스텔스 헤더 적용
-                        await page.setExtraHTTPHeaders({
-                            'Referer': lpUrl,
-                            'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7'
-                        });
-
-                        await page.goto(detailUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-
-                        // 차단 여부 확인
-                        const body = await page.content();
-                        if (body.includes('Access Denied') || body.includes('잠시 후 다시 시도해 주세요')) {
-                            sendLog(`${progress} 🛑 차단됨! IP를 확인하거나 브라우저에서 캡차를 풀어주세요.`);
-                            await delay(10000);
-                            continue;
+                        // [개선 3] 화면 스크롤 및 마우스 움직임 (사람인 척 위장)
+                        if (!isStopRequested) {
+                            try {
+                                const scrollY = Math.floor(Math.random() * 600) - 100; // 위아래 랜덤 스크롤
+                                await page.mouse.wheel(0, scrollY);
+                                await page.mouse.move(Math.floor(Math.random() * 800) + 100, Math.floor(Math.random() * 600) + 100, { steps: 5 });
+                                await delay(Math.floor(Math.random() * 1000) + 500); // 짧은 딜레이
+                            } catch (e) { }
                         }
 
-                        // --- 내부 API를 통한 리뷰 정보 추출 ---
-                        await delay(1000);
-
+                        // 페이지 이동을 최소화하기 위해 '현재 목록 페이지(lpUrl)'에서 
+                        // 곧바로 해당 상품의 리뷰 API만 비동기로 찔러서 데이터만 가져옴.
                         const reviewData = await page.evaluate(async ({ pid, targetPage }) => {
                             try {
-                                // 페이지당 10개씩 가져오는 API 호출
+                                // 쿠팡 시스템에 사람처럼 보이기 위한 랜덤 지연 (브라우저 컨텍스트 내)
+                                await new Promise(r => setTimeout(r, Math.random() * 2000 + 1000));
+
                                 const apiUrl = `https://www.coupang.com/next-api/review?productId=${pid}&page=${targetPage}&size=10&sortBy=DATE_DESC&market=kr`;
-                                const response = await fetch(apiUrl, { headers: { 'Accept': '*/*' } });
+                                const response = await fetch(apiUrl, {
+                                    // [개선 2] 실제 브라우저처럼 보이기 위한 정교한 HTTP Header 추가
+                                    headers: {
+                                        'Accept': 'application/json, text/plain, */*',
+                                        'Accept-Language': navigator.language || 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+                                        'User-Agent': navigator.userAgent,
+                                        'Referer': window.location.href, // 중요: 목록에서 보낸 것처럼 위장
+                                        'Sec-Fetch-Dest': 'empty',
+                                        'Sec-Fetch-Mode': 'cors',
+                                        'Sec-Fetch-Site': 'same-origin',
+                                        'Cache-Control': 'no-cache',
+                                        'Pragma': 'no-cache'
+                                    }
+                                });
+
                                 if (response.ok) {
                                     const data = await response.json();
                                     const contents = data.rData?.paging?.contents || [];
                                     if (contents.length > 0) {
                                         const last = contents[contents.length - 1];
                                         return {
+                                            success: true,
                                             count: contents.length,
                                             lastReviewAt: last.reviewAt ? new Date(last.reviewAt).getTime() : null,
                                             lastReviewDate: last.reviewAt ? new Date(last.reviewAt).toISOString().split('T')[0] : '',
                                             lastName: last.name || ''
                                         };
+                                    } else {
+                                        return { success: true, count: 0 }; // 성공했지만 리뷰가 없는 경우
                                     }
+                                } else {
+                                    // 403 Forbidden 등 에러 발생 시
+                                    return { success: false, status: response.status };
                                 }
-                            } catch (e) { }
-                            return null;
+                            } catch (e) {
+                                return { success: false, error: e.message };
+                            }
                         }, { pid: product.productId, targetPage: currentConfig.checkPage });
 
-                        if (reviewData && reviewData.lastReviewAt) {
-                            // 날짜 필터링 (최근 N일 이내)
-                            const cutoffDate = Date.now() - (currentConfig.reviewDays * 24 * 60 * 60 * 1000);
+                        if (reviewData && reviewData.success) {
+                            if (reviewData.count > 0 && reviewData.lastReviewAt) {
+                                // 날짜 필터링 (최근 N일 이내)
+                                const cutoffDate = Date.now() - (currentConfig.reviewDays * 24 * 60 * 60 * 1000);
 
-                            if (reviewData.lastReviewAt >= cutoffDate) {
-                                const resultEntry = {
-                                    productId: product.productId,
-                                    date: reviewData.lastReviewDate,
-                                    url: `https://www.coupang.com/vp/products/${product.productId}`
-                                };
+                                if (reviewData.lastReviewAt >= cutoffDate) {
+                                    const resultEntry = {
+                                        productId: product.productId,
+                                        date: reviewData.lastReviewDate,
+                                        url: detailUrl
+                                    };
 
-                                allResults.push(resultEntry);
-                                processedIds.add(product.productId);
+                                    allResults.push(resultEntry);
+                                    processedIds.add(product.productId);
 
-                                // 증분 저장
-                                fs.writeFileSync(currentConfig.resultFile, JSON.stringify(allResults, null, 2));
-                                sendStats(allResults.length); // 건수 업데이트 전송
-                                sendLog(`${progress} ✅ 성공: 최근 리뷰 확인됨. (총 저장: ${allResults.length})`);
+                                    fs.writeFileSync(currentConfig.resultFile, JSON.stringify(allResults, null, 2));
+                                    sendStats(allResults.length);
+                                    sendLog(`${progress} ✅ 성공: 최근 리뷰 확인됨. (총 저장: ${allResults.length})`);
+                                } else {
+                                    sendLog(`${progress} ⏩ 건너뜀: ${currentConfig.checkPage}페이지 리뷰가 너무 오래됨 (${reviewData.lastReviewDate})`);
+                                }
                             } else {
-                                sendLog(`${progress} ⏩ 건너뜀: ${currentConfig.checkPage}페이지 리뷰가 너무 오래됨 (${reviewData.lastReviewDate})`);
+                                sendLog(`${progress} ⏩ 건너뜀: ${currentConfig.checkPage}페이지에 리뷰가 없음.`);
                             }
                         } else {
-                            sendLog(`${progress} ⏩ 건너뜀: ${currentConfig.checkPage}페이지에 리뷰가 없음.`);
+                            // API 직접 호출 시 차단되었거나 에러가 났을 경우에만 상세 페이지로 fallback 방문
+                            sendLog(`${progress} ⚠️ 백그라운드 API 호출 실패. 상세 페이지 우회 접속 시도 중...`);
+
+                            await page.setExtraHTTPHeaders({
+                                'Referer': lpUrl,
+                                'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7'
+                            });
+
+                            await page.goto(detailUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+
+                            const body = await page.content();
+                            if (body.includes('Access Denied') || body.includes('잠시 후 다시 시도해 주세요')) {
+                                sendLog(`${progress} 🛑 차단됨! IP를 확인하거나 브라우저에서 캡차를 풀어주세요.`);
+                                await delay(15000); // 차단 시 대기시간 증가
+                                // 목록 페이지로 돌아가기
+                                await page.goto(lpUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+                                continue;
+                            }
+
+                            await delay(2000);
+                            // 화면 전환 후 재시도
+                            const retryReviewData = await page.evaluate(async ({ pid, targetPage }) => {
+                                // ... retry logic ...
+                                try {
+                                    const apiUrl = `https://www.coupang.com/next-api/review?productId=${pid}&page=${targetPage}&size=10&sortBy=DATE_DESC&market=kr`;
+                                    const response = await fetch(apiUrl, {
+                                        headers: {
+                                            'Accept': 'application/json, text/plain, */*',
+                                            'Accept-Language': navigator.language || 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+                                            'User-Agent': navigator.userAgent,
+                                            'Referer': window.location.href,
+                                            'Sec-Fetch-Dest': 'empty',
+                                            'Sec-Fetch-Mode': 'cors',
+                                            'Sec-Fetch-Site': 'same-origin',
+                                            'Cache-Control': 'no-cache',
+                                            'Pragma': 'no-cache'
+                                        }
+                                    });
+                                    if (response.ok) {
+                                        const data = await response.json();
+                                        const contents = data.rData?.paging?.contents || [];
+                                        if (contents.length > 0) {
+                                            const last = contents[contents.length - 1];
+                                            return {
+                                                lastReviewAt: last.reviewAt ? new Date(last.reviewAt).getTime() : null,
+                                                lastReviewDate: last.reviewAt ? new Date(last.reviewAt).toISOString().split('T')[0] : '',
+                                            };
+                                        }
+                                    }
+                                } catch (e) { }
+                                return null;
+                            }, { pid: product.productId, targetPage: currentConfig.checkPage });
+
+                            if (retryReviewData && retryReviewData.lastReviewAt) {
+                                const cutoffDate = Date.now() - (currentConfig.reviewDays * 24 * 60 * 60 * 1000);
+                                if (retryReviewData.lastReviewAt >= cutoffDate) {
+                                    const resultEntry = {
+                                        productId: product.productId,
+                                        date: retryReviewData.lastReviewDate,
+                                        url: detailUrl
+                                    };
+
+                                    allResults.push(resultEntry);
+                                    processedIds.add(product.productId);
+                                    fs.writeFileSync(currentConfig.resultFile, JSON.stringify(allResults, null, 2));
+                                    sendStats(allResults.length);
+                                    sendLog(`${progress} ✅ 성공 (우회): 최근 리뷰 확인됨. (총 저장: ${allResults.length})`);
+                                } else {
+                                    sendLog(`${progress} ⏩ 건너뜀: ${currentConfig.checkPage}페이지 리뷰 너무 오래됨`);
+                                }
+                            } else {
+                                sendLog(`${progress} ⏩ 건너뜀: ${currentConfig.checkPage}페이지에 리뷰 없음`);
+                            }
+
+                            // 상세 페이지 방문 후에는 다시 목록 페이지로 돌아가기
+                            await page.goto(lpUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
                         }
 
                     } catch (err) {
                         sendLog(`${progress} ❌ 상품 처리 중 오류 발생: ${err.message}`);
                     }
 
-                    // 상품 간 랜덤 대기
-                    const productWait = Math.floor(Math.random() * 3000) + 2000;
+                    // 상품 간 랜덤 대기 (인간다운 패턴 유지)
+                    const productWait = Math.floor(Math.random() * 4000) + 3000;
                     await delay(productWait);
 
-                    // 목록 페이지로 복귀하여 계속 진행
-                    await page.goto(lpUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+                    // [개선 1] 주기적인 "긴 휴식" 패턴 적용 (사람이 쉬는 것처럼 위장)
+                    sessionProcessedCount++;
+                    if (sessionProcessedCount >= nextBreakCount && !isStopRequested) {
+                        const restTime = Math.floor(Math.random() * 45000) + 45000; // 45초 ~ 90초 대기
+                        sendLog(`\n[휴식] 봇 탐지를 회피하기 위해 사람처럼 잠시 화면을 멈춰둡니다... ☕ (${Math.floor(restTime / 1000)}초 대기)\n`);
+                        await delay(restTime);
+                        sessionProcessedCount = 0; // 카운트 초기화
+                        nextBreakCount = Math.floor(Math.random() * 10) + 25; // 다음 휴식 목표 개수(25~34개) 재설정
+                    }
+
+                    // 이제 여기서 무조건 lpUrl로 다시 돌아가지 않습니다. (상세 페이지를 방문한 경우에만 위에서 돌아갔음)
                 }
 
                 // 목록 페이지 간 랜덤 대기
